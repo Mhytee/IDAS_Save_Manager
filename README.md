@@ -21,16 +21,13 @@ This app helps you launch your Initial D games and safely manage multiple save f
 - Supporting Initial D Arcade Stage 6, 7, and 8 (TeknoParrot versions)
 
 ✨ Features:  
-- ✅ Launch games directly with a selected save (no need to open TeknoParrotUI)  
-- ❌ Launch with no save file  
+- 🔁 **Automatically backs up** save files from `AppData\TeknoParrot\`
+- 💾 **Restore and launch** any save directly — no need to open TeknoParrot manually
+- ❌ **Launch without a save** — ideal for creating new profiles
 - 📝 **Rename**, 📄 **Duplicate**, and 🗑️ **Delete** saves
-- ✨ Automatically reads your in-game player name from the save file and uses it when naming new saves (when possible)  
-- 🔘 Option to skip save name confirmation and safely auto-name silently (toggle available in UI)  
-- 🔁 Automatically backs up:  
-  - Any save detected in `AppData\TeknoParrot\` when the program starts  
-  - New saves created during “Continue Without Save” sessions  
-- 💾 Organizes backups by game prefix (`ID6_`, `ID7_`, `ID8_`)  
-- 🧠 Remembers your last selected game and save between launches
+- ✨ **Reads your in-game player name** and uses it as the save name (when possible)
+- 🔘 Optional **toggle to skip save name prompts** and auto-name silently
+- 🧠 **Remembers your last selected game and save** between launches
 
 💾 SAVE FILES LOCATION  
 ----------------------  
@@ -39,12 +36,14 @@ All backups are stored at:
 
 ⚙️ PROGRAM BEHAVIOR  
 -------------------  
-- If you launch without a save, the app will monitor for new save files.  
-  - When TeknoParrot exits, you'll be prompted to name and store the new save (or it will auto-name if the prompt is skipped).  
+- On first launch, the program will detect your existing save file and promot you to import it.
+
+- If you launch a game without a save, the app will monitor for new save files.  
+  - When Teknoparrot exits, you'll be prompted to name and store the new save (or it will auto-name if the prompt is skipped).  
 
 - If a save is already in TeknoParrot's AppData folder at launch, it is treated as external and will be imported.
 
-- The app always removes save files from TeknoParrot’s folder after each session to prevent accidental overwrites.
+- The app always moves save files from TeknoParrot’s folder after each session to prevent accidental overwrites.
 
 🧽 UNINSTALLING  
 ---------------  
