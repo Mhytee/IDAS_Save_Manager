@@ -36,7 +36,7 @@ All backups are stored at:
 
 ⚙️ PROGRAM BEHAVIOR  
 -------------------  
-- On first launch, the program will detect your existing save file and promot you to import it.
+- On first launch, the program will detect your existing save files and prompt you to import them.
 
 - If you launch a game without a save, the app will monitor for new save files.  
   - When Teknoparrot exits, you'll be prompted to name and store the new save (or it will auto-name if the prompt is skipped).  
