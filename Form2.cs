@@ -69,58 +69,60 @@ namespace IDAS_Save_System
             this.MinimumSize = new Size(479, 501);
         }
 
-        private void Form2_Load(object sender, EventArgs e)
+        private async void Form2_Load(object sender, EventArgs e)
+{
+    // ✅ Check for updates before doing anything else
+    await UpdateChecker.CheckAndPerformUpdate();
+
+    Directory.CreateDirectory(appDataPath);
+    Directory.CreateDirectory(backupPath);
+    LoadOrPromptTeknoParrotPath();
+    HandleFirstRunBackup();
+
+    chkAutoNameOnly.CheckedChanged += (s, e) => SaveConfig();
+    comboSaves.SelectedIndexChanged += comboSaves_SelectedIndexChanged;
+
+    picID6.Click += Pic_Click;
+    picID7.Click += Pic_Click;
+    picID8.Click += Pic_Click;
+
+    textBox1.GotFocus += (s, e) => this.ActiveControl = null;
+    textBox2.GotFocus += (s, e) => this.ActiveControl = null;
+    textBox3.GotFocus += (s, e) => this.ActiveControl = null;
+
+    this.StartPosition = FormStartPosition.Manual;
+    this.Location = new Point(
+        Screen.PrimaryScreen.Bounds.X + (Screen.PrimaryScreen.Bounds.Width - this.Width) / 2,
+        Screen.PrimaryScreen.Bounds.Y + (Screen.PrimaryScreen.Bounds.Height - this.Height) / 2
+    );
+
+    suppressSaveSelectionEvents = true;
+
+    if (selectedGameIndex >= 0)
+    {
+        PictureBox[] pics = { picID6, picID7, picID8 };
+        if (selectedGameIndex < pics.Length)
+            Pic_Click(pics[selectedGameIndex], EventArgs.Empty);
+    }
+
+    LoadBackupList();
+
+    if (!string.IsNullOrWhiteSpace(lastSelectedSaveName))
+    {
+        foreach (var item in comboSaves.Items)
         {
-            Directory.CreateDirectory(appDataPath);
-            Directory.CreateDirectory(backupPath);
-            LoadOrPromptTeknoParrotPath();
-            HandleFirstRunBackup();
-
-            chkAutoNameOnly.CheckedChanged += (s, e) => SaveConfig();
-            comboSaves.SelectedIndexChanged += comboSaves_SelectedIndexChanged;
-
-            picID6.Click += Pic_Click;
-            picID7.Click += Pic_Click;
-            picID8.Click += Pic_Click;
-
-            textBox1.GotFocus += (s, e) => this.ActiveControl = null;
-            textBox2.GotFocus += (s, e) => this.ActiveControl = null;
-            textBox3.GotFocus += (s, e) => this.ActiveControl = null;
-
-            this.StartPosition = FormStartPosition.Manual;
-            this.Location = new Point(
-                Screen.PrimaryScreen.Bounds.X + (Screen.PrimaryScreen.Bounds.Width - this.Width) / 2,
-                Screen.PrimaryScreen.Bounds.Y + (Screen.PrimaryScreen.Bounds.Height - this.Height) / 2
-            );
-
-            // ⛔ Prevent selected index from triggering a config save during startup
-            suppressSaveSelectionEvents = true;
-
-            // Select game picture before loading saves
-            if (selectedGameIndex >= 0)
+            if ((item as ComboBoxItem)?.FullFilename == lastSelectedSaveName)
             {
-                PictureBox[] pics = { picID6, picID7, picID8 };
-                if (selectedGameIndex < pics.Length)
-                    Pic_Click(pics[selectedGameIndex], EventArgs.Empty);
+                comboSaves.SelectedItem = item;
+                break;
             }
-
-            LoadBackupList();
-
-            if (!string.IsNullOrWhiteSpace(lastSelectedSaveName))
-            {
-                foreach (var item in comboSaves.Items)
-                {
-                    if ((item as ComboBoxItem)?.FullFilename == lastSelectedSaveName)
-                    {
-                        comboSaves.SelectedItem = item;
-                        break;
-                    }
-                }
-            }
-
-            suppressSaveSelectionEvents = false; // ✅ Allow normal save tracking from now on
-            UpdateLaunchButtons();
         }
+    }
+
+    suppressSaveSelectionEvents = false;
+    UpdateLaunchButtons();
+}
+
 
 
         private void UpdateSetPathButton()
@@ -244,10 +246,17 @@ namespace IDAS_Save_System
                     string extracted = SaveFileHelper.TryExtractPlayerName(saveFilePath);
                     string name = extracted ?? DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
-                    if (!chkAutoNameOnly.Checked)
+                    bool skipPrompt = chkAutoNameOnly.Checked &&
+                                      !string.IsNullOrWhiteSpace(name) &&
+                                      !ContainsInvalidFileNameChars(name);
+
+                    if (!skipPrompt)
                     {
-                        string promptText = $"A save file was found for {displayName}. Please provide a name for this save:";
-                        string input = Prompt.ShowDialog(promptText, "Import Save", extracted);
+                        string promptText = ContainsInvalidFileNameChars(name)
+                            ? $"The extracted name for {displayName} contains invalid characters.\nPlease provide a valid name:"
+                            : $"A save file was found for {displayName}. Please provide a name for this save:";
+
+                        string input = PromptForValidName(promptText, "Import Save", extracted);
 
                         if (!string.IsNullOrWhiteSpace(input))
                             name = input;
@@ -263,6 +272,8 @@ namespace IDAS_Save_System
                 }
             }
         }
+
+
 
 
         private void LoadOrPromptTeknoParrotPath()
@@ -402,18 +413,22 @@ namespace IDAS_Save_System
                                     string extracted = SaveFileHelper.TryExtractPlayerName(path);
                                     string name = extracted;
 
-                                    if (!chkAutoNameOnly.Checked)
+                                    bool skipPrompt = chkAutoNameOnly.Checked &&
+                                                      !string.IsNullOrWhiteSpace(name) &&
+                                                      !ContainsInvalidFileNameChars(name);
+
+                                    string promptText = ContainsInvalidFileNameChars(name)
+                                    ? "The extracted name contains invalid characters.\nPlease provide a valid name for your save:"
+    :                               $"Name the save created for {displayName} during your last session:";
+
+                                    if (!skipPrompt)
                                     {
-                                        string input = Prompt.ShowDialog(
-                                            $"Name the save created for {displayName} during your last session:",
+                                        name = PromptForValidName(
+                                            promptText,
                                             "New Save Detected",
                                             extracted
                                         );
-
-                                        if (!string.IsNullOrWhiteSpace(input))
-                                            name = input;
                                     }
-
                                     string rawName = string.IsNullOrWhiteSpace(name)
                                         ? "AutoBackup_" + DateTime.Now.ToString("yyyyMMdd_HHmmss")
                                         : name;
@@ -426,6 +441,7 @@ namespace IDAS_Save_System
                                 File.Delete(path);
                             }
                         }
+
 
                         LoadBackupList();
 
@@ -446,6 +462,31 @@ namespace IDAS_Save_System
             teknoExitTimer.Start();
         }
 
+        private bool ContainsInvalidFileNameChars(string input)
+        {
+            return input.Any(c => Path.GetInvalidFileNameChars().Contains(c));
+        }
+
+        private string PromptForValidName(string message, string title, string defaultValue = "")
+        {
+            string name;
+            do
+            {
+                name = Prompt.ShowDialog(message, title, defaultValue);
+
+                if (string.IsNullOrWhiteSpace(name))
+                    return null;
+
+                if (ContainsInvalidFileNameChars(name))
+                {
+                    MessageBox.Show("Name contains invalid characters. Please avoid:\n\\ / : * ? \" < > |",
+                        "Invalid Name", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+
+                return name;
+            } while (true);
+        }
 
 
 
@@ -456,7 +497,7 @@ namespace IDAS_Save_System
             if (selectedItem != null)
             {
                 string oldName = selectedItem.FullFilename;
-                string newName = Prompt.ShowDialog("Enter new name for the save:", "Rename Save");
+                string newName = PromptForValidName("Enter new name for the save:", "Rename Save", selectedItem.DisplayText);
                 if (!string.IsNullOrWhiteSpace(newName))
                 {
                     string prefix = GetSelectedGamePrefix();
@@ -511,8 +552,7 @@ namespace IDAS_Save_System
                 while (File.Exists(Path.Combine(backupPath, $"{prefix}_{suggestedName}.bin")));
 
                 // Show pre-filled prompt with safe suggestion
-                string newName = Prompt.ShowDialog("Enter name for duplicated save:", "Duplicate Save", suggestedName);
-
+                string newName = PromptForValidName("Enter name for duplicated save:", "Duplicate Save", suggestedName);
                 if (!string.IsNullOrWhiteSpace(newName))
                 {
                     string newPath = GetUniqueSavePath(newName, prefix);
