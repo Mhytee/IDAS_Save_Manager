@@ -23,11 +23,9 @@ This app helps you launch your Initial D games and safely manage multiple save f
 ✨ Features:  
 - ✅ Launch games directly with a selected save (no need to open TeknoParrotUI)  
 - ❌ Launch with no save file  
-- 📝 Rename any save  
-- 🗑️ Delete saves (with confirmation)  
-- 📄 Duplicate saves with automatic name suggestions  
+- 📝 **Rename**, 📄 **Duplicate**, and 🗑️ **Delete** saves
 - ✨ Automatically reads your in-game player name from the save file and uses it when naming new saves (when possible)  
-- 🔘 Option to skip save name prompts and safely auto-name silently (toggle available in UI)  
+- 🔘 Option to skip save name confirmation and safely auto-name silently (toggle available in UI)  
 - 🔁 Automatically backs up:  
   - Any save detected in `AppData\TeknoParrot\` when the program starts  
   - New saves created during “Continue Without Save” sessions  
