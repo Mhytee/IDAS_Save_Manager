@@ -3,7 +3,7 @@ INITIAL D ARCADE STAGE SAVE MANAGER
 
 Launch Games & Manage Multiple Save Files for Initial D Arcade Stage 6–8 (TeknoParrot)
 
-> I originally made this program so that it would be easy for my girlfriend and/or guests to play on their own save files and for us to switch back and forth easily...  
+> I originally made this program so that it would be easy for my girlfriend and/or guests to play on their own saves and for us to be able to switch back and forth easily...  
 > Turns out she doesn't enjoy playing and I have no friends — so here it is, for anyone else who might find it useful.
 
 📂 INSTALLATION  
