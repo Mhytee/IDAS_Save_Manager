@@ -8,9 +8,11 @@ Launch Games & Manage Multiple Save Files for Initial D Arcade Stage 6–8 (Tekn
 
 📂 INSTALLATION  
 ---------------  
-1. Unzip this folder anywhere you like (e.g., Desktop or Documents).  
-2. Run the program by double-clicking `IDAS_Save_Manager.exe`.  
-3. On first launch, click the large red button at the top to set your TeknoParrotUi.exe path. (REQUIRED)
+1. Download the latest `.zip` release from the [Releases](https://github.com/mhytee/idas_save_manager/releases) tab.  
+2. Extract the folder anywhere you like (e.g., Desktop or Documents).  
+3. Run the program by double-clicking `IDAS_Save_Manager.exe`.  
+4. On first launch, click the large red button at the top to set your `TeknoParrotUi.exe` path. _(This is required before launching any games.)_
+
 
 🧠 WHAT THIS TOOL DOES  
 ----------------------  
