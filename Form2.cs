@@ -19,8 +19,13 @@ namespace IDAS_Save_System
         string profileFile = "";
         string teknoExePath = "";
         string userProfilesPath => string.IsNullOrWhiteSpace(teknoExePath) ? "" : Path.Combine(Path.GetDirectoryName(teknoExePath), "UserProfiles");
-        string currentSaveName = "";
-        bool pendingSaveNeedsName = false;
+        // Full backup filename of the save that was launched ("" for no-save
+        // sessions), so the write-back targets exactly the file that was loaded
+        // instead of reconstructing the name from a display string.
+        string launchedSaveFile = "";
+        int launchedGameIndex = -1;
+        bool sessionActive = false;
+        Process teknoProcess;
         Timer teknoExitTimer;
         Button btnUpdate;
         ToolTip updateToolTip = new ToolTip();
@@ -86,6 +91,26 @@ namespace IDAS_Save_System
             };
             btnUpdate.Click += btnUpdate_Click;
             this.Controls.Add(btnUpdate);
+
+            this.FormClosing += Form2_FormClosing;
+        }
+
+        private void Form2_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            // Never veto an OS-initiated close: the session save is recovered by
+            // the stray-card import on next startup anyway.
+            if (!sessionActive ||
+                e.CloseReason == CloseReason.WindowsShutDown ||
+                e.CloseReason == CloseReason.TaskManagerClosing)
+                return;
+
+            var result = MessageBox.Show(this,
+                "A game session is still running.\n\n" +
+                "If you close the manager now, this session's save will be imported " +
+                "the next time you open it (after the game closes).\n\nClose anyway?",
+                "Game Session Running", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (result != DialogResult.Yes)
+                e.Cancel = true;
         }
 
         private void Form2_Load(object sender, EventArgs e)
@@ -93,7 +118,15 @@ namespace IDAS_Save_System
     Directory.CreateDirectory(appDataPath);
     Directory.CreateDirectory(backupPath);
     LoadOrPromptTeknoParrotPath();
-    HandleFirstRunBackup();
+
+    // Never import while TeknoParrot is running: the card in its folder may be
+    // in use by a live game, and grabbing it would hand the player a stale save.
+    if (IsTeknoParrotRunning())
+        MessageBox.Show(this,
+            "TeknoParrot is currently running.\nAny existing save will be imported the next time you start the manager after it closes.",
+            "TeknoParrot Running", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    else
+        HandleFirstRunBackup();
 
     chkAutoNameOnly.CheckedChanged += (s, e) => SaveConfig();
     comboSaves.SelectedIndexChanged += comboSaves_SelectedIndexChanged;
@@ -138,7 +171,11 @@ namespace IDAS_Save_System
     suppressSaveSelectionEvents = false;
     UpdateLaunchButtons();
 
-    _ = Task.Run(UpdateChecker.CleanupAfterUpdate);
+    _ = Task.Run(() =>
+    {
+        UpdateChecker.CleanupAfterUpdate();
+        PurgeOldTrash();
+    });
     CheckForUpdatesInBackground();
 }
 
@@ -172,7 +209,7 @@ namespace IDAS_Save_System
             if (pendingUpdate == null || updateInProgress)
                 return;
 
-            if (teknoExitTimer != null)
+            if (sessionActive)
             {
                 MessageBox.Show(this,
                     "A game session is still running. Finish the session first, then update.",
@@ -201,7 +238,7 @@ namespace IDAS_Save_System
 
             // Belt and braces: never swap the exe while a session is active —
             // the restart would kill the watchdog that backs up the session's save.
-            if (teknoExitTimer != null)
+            if (sessionActive)
             {
                 updateInProgress = false;
                 UpdateLaunchButtons();
@@ -227,25 +264,35 @@ namespace IDAS_Save_System
 
         private void UpdateSetPathButton()
         {
-            btnSetPath.Text = string.IsNullOrWhiteSpace(teknoExePath)
-                ? "Click to Set TeknoParrot Path (Not Set)"
-                : "Click to Change TeknoParrot Path ✅";
-
-            btnSetPath.BackColor = string.IsNullOrWhiteSpace(teknoExePath)
-                ? Color.LightCoral
-                : Color.LightGreen;
+            bool pathOk = !string.IsNullOrWhiteSpace(teknoExePath) && File.Exists(teknoExePath);
+            btnSetPath.Text = pathOk
+                ? "Click to Change TeknoParrot Path ✅"
+                : "Click to Set TeknoParrot Path (Not Set)";
+            btnSetPath.BackColor = pathOk ? Color.LightGreen : Color.LightCoral;
         }
+        // The only config writer: always writes every setting, atomically
+        // (write to .tmp, then swap) so a crash mid-write can't truncate it.
         private void SaveConfig()
         {
-            Directory.CreateDirectory(appDataPath);
-            File.WriteAllLines(configFile, new[]
+            try
             {
-        "Path to TeknoParrotUI.exe:",
-        teknoExePath,
-        $"SelectedGameIndex:{selectedGameIndex}",
-        $"SelectedSaveName:{lastSelectedSaveName}",
-        $"AutoNameEnabled={chkAutoNameOnly.Checked.ToString().ToLower()}"
-    });
+                Directory.CreateDirectory(appDataPath);
+                string tmp = configFile + ".tmp";
+                File.WriteAllLines(tmp, new[]
+                {
+                    "Path to TeknoParrotUI.exe:",
+                    teknoExePath,
+                    $"SelectedGameIndex:{selectedGameIndex}",
+                    $"SelectedSaveName:{lastSelectedSaveName}",
+                    $"AutoNameEnabled={chkAutoNameOnly.Checked.ToString().ToLower()}"
+                });
+                File.Move(tmp, configFile, true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Settings could not be saved ({ex.Message}).",
+                    "Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void LoadBackupList()
@@ -258,7 +305,9 @@ namespace IDAS_Save_System
             foreach (var file in files)
             {
                 string fullFile = Path.GetFileName(file);
-                string displayName = fullFile.Replace(prefix + "_", "");
+                // Strip only the leading prefix: a save named "ID6_Bob" must not
+                // have the token removed from the middle of its display name.
+                string displayName = fullFile.StartsWith(prefix + "_") ? fullFile.Substring(prefix.Length + 1) : fullFile;
                 comboSaves.Items.Add(new ComboBoxItem(displayName, fullFile));
             }
 
@@ -266,18 +315,6 @@ namespace IDAS_Save_System
                 comboSaves.SelectedIndex = 0;
 
             UpdateLaunchButtons();
-        }
-
-        private void SavePreferences()
-        {
-            var lines = new[]
-            {
-                "Path to TeknoParrotUI.exe:",
-                teknoExePath,
-                $"SelectedGameIndex:{selectedGameIndex}",
-                $"SelectedSaveName:{(comboSaves.SelectedItem as ComboBoxItem)?.FullFilename}"
-            };
-            File.WriteAllLines(configFile, lines);
         }
 
         private void comboSaves_SelectedIndexChanged(object sender, EventArgs e)
@@ -326,11 +363,32 @@ namespace IDAS_Save_System
 
         private void UpdateLaunchButtons()
         {
-            // Launching is blocked while an update download runs: a completed
-            // update restarts the app, which would kill the watchdog that backs
-            // up the session's save when the game closes.
-            btnLaunch.Enabled = !updateInProgress && comboSaves.SelectedItem != null && selectedGameIndex >= 0;
-            btnNoSave.Enabled = !updateInProgress && selectedGameIndex >= 0;
+            // Launching is blocked while a session runs (the card file is in use)
+            // and while an update download runs (a completed update restarts the
+            // app, which would kill the watchdog that backs up the session save).
+            bool blocked = sessionActive || updateInProgress;
+            btnLaunch.Enabled = !blocked && comboSaves.SelectedItem != null && selectedGameIndex >= 0;
+            btnNoSave.Enabled = !blocked && selectedGameIndex >= 0;
+        }
+
+        private void SetSessionUiState(bool active)
+        {
+            // Rename/Duplicate/Delete are blocked mid-session: the watchdog will
+            // write the session's save back under the name it was launched with.
+            btnRename.Enabled = !active;
+            btnDelete.Enabled = !active;
+            btnDuplicate.Enabled = !active;
+            btnLaunch.Text = active ? "Game Running…" : "Launch Game!";
+            UpdateLaunchButtons();
+        }
+
+        private bool IsTeknoParrotRunning()
+        {
+            Process[] procs = Process.GetProcessesByName("TeknoParrotUi");
+            bool running = procs.Length > 0;
+            foreach (Process p in procs)
+                p.Dispose();
+            return running;
         }
 
         private string GetSelectedGamePrefix() => selectedGameIndex >= 0 ? idGames[selectedGameIndex].profile.Replace(".xml", "") : "Unknown";
@@ -339,40 +397,78 @@ namespace IDAS_Save_System
 
         private void HandleFirstRunBackup()
         {
-            foreach (var (profile, displayName, saveFileName) in idGames)
+            for (int i = 0; i < idGames.Length; i++)
+                ImportStrayCard(i);
+        }
+
+        // Moves a card sitting in TeknoParrot's folder into the backup list
+        // (named via the prompt flow). Used at startup for all games and before
+        // launching, so an unknown save is never overwritten or deleted.
+        // Returns false if a card exists but could not be imported.
+        private bool ImportStrayCard(int gameIndex, bool selectImported = true)
+        {
+            var (profile, displayName, saveFileName) = idGames[gameIndex];
+            string prefix = profile.Replace(".xml", "");
+            string saveFilePath = Path.Combine(savePathRoot, saveFileName);
+
+            if (!File.Exists(saveFilePath))
+                return true;
+
+            try
             {
-                string prefix = profile.Replace(".xml", "");
-                string saveFilePath = Path.Combine(savePathRoot, saveFileName);
+                string extracted = SaveFileHelper.TryExtractPlayerName(saveFilePath);
+                string name = extracted ?? DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
-                if (File.Exists(saveFilePath))
+                bool skipPrompt = chkAutoNameOnly.Checked &&
+                                  !string.IsNullOrWhiteSpace(name) &&
+                                  !ContainsInvalidFileNameChars(name);
+
+                if (!skipPrompt)
                 {
-                    string extracted = SaveFileHelper.TryExtractPlayerName(saveFilePath);
-                    string name = extracted ?? DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    string promptText = ContainsInvalidFileNameChars(name)
+                        ? $"The extracted name for {displayName} contains invalid characters.\nPlease provide a valid name:"
+                        : $"A save file was found for {displayName}. Please provide a name for this save:";
 
-                    bool skipPrompt = chkAutoNameOnly.Checked &&
-                                      !string.IsNullOrWhiteSpace(name) &&
-                                      !ContainsInvalidFileNameChars(name);
+                    string input = PromptForValidName(promptText, "Import Save", extracted);
 
-                    if (!skipPrompt)
-                    {
-                        string promptText = ContainsInvalidFileNameChars(name)
-                            ? $"The extracted name for {displayName} contains invalid characters.\nPlease provide a valid name:"
-                            : $"A save file was found for {displayName}. Please provide a name for this save:";
-
-                        string input = PromptForValidName(promptText, "Import Save", extracted);
-
-                        if (!string.IsNullOrWhiteSpace(input))
-                            name = input;
-                    }
-
-                    string finalPath = GetUniqueSavePath(name, prefix);
-                    File.Copy(saveFilePath, finalPath);
-                    LoadBackupList();
-                    comboSaves.SelectedItem = comboSaves.Items
-                        .Cast<ComboBoxItem>()
-                        .FirstOrDefault(i => i.FullFilename == Path.GetFileName(finalPath));
-                    File.Delete(saveFilePath);
+                    if (!string.IsNullOrWhiteSpace(input))
+                        name = input;
                 }
+
+                string previousSelection = (comboSaves.SelectedItem as ComboBoxItem)?.FullFilename;
+                string finalPath = GetUniqueSavePath(name, prefix);
+                File.Copy(saveFilePath, finalPath);
+                File.Delete(saveFilePath);
+
+                suppressSaveSelectionEvents = true;
+                try
+                {
+                    LoadBackupList();
+                    string toSelect = selectImported ? Path.GetFileName(finalPath) : previousSelection;
+                    var restore = comboSaves.Items
+                        .Cast<ComboBoxItem>()
+                        .FirstOrDefault(x => x.FullFilename == toSelect);
+                    if (restore != null)
+                        comboSaves.SelectedItem = restore; // otherwise keep LoadBackupList's default
+                }
+                finally
+                {
+                    suppressSaveSelectionEvents = false;
+                }
+                string nowSelected = (comboSaves.SelectedItem as ComboBoxItem)?.FullFilename;
+                if (!string.IsNullOrEmpty(nowSelected) && nowSelected != lastSelectedSaveName)
+                {
+                    lastSelectedSaveName = nowSelected;
+                    SaveConfig();
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Could not import the existing {displayName} save ({ex.Message}).\nThe file was left in place.",
+                    "Import Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
             }
         }
 
@@ -422,147 +518,372 @@ namespace IDAS_Save_System
 
             if (dialog.ShowDialog() == DialogResult.OK)
             {
+                if (!Path.GetFileName(dialog.FileName).Equals("TeknoParrotUi.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    var proceed = MessageBox.Show(this,
+                        "The selected file is not named TeknoParrotUi.exe.\n" +
+                        "Session tracking may not work correctly with a different launcher.\n\nUse it anyway?",
+                        "Unexpected File", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (proceed != DialogResult.Yes)
+                    {
+                        UpdateSetPathButton();
+                        return;
+                    }
+                }
                 teknoExePath = dialog.FileName;
-                Directory.CreateDirectory(appDataPath);
-                File.WriteAllText(configFile, $"Path to TeknoParrotUI.exe:\n{teknoExePath}");
+                SaveConfig();
             }
-            else
+            else if (string.IsNullOrWhiteSpace(teknoExePath))
             {
+                // Cancelling must not erase an already-working path.
                 MessageBox.Show("Program will not function without setting the TeknoParrotUI.exe path!", "Path Not Set", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                teknoExePath = "";
             }
             UpdateSetPathButton();
+        }
+
+        private bool ValidateReadyToLaunch()
+        {
+            if (string.IsNullOrWhiteSpace(teknoExePath) || !File.Exists(teknoExePath))
+            {
+                MessageBox.Show(this,
+                    "TeknoParrotUi.exe was not found. Click the button at the top to set its location.",
+                    "TeknoParrot Not Found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                UpdateSetPathButton();
+                return false;
+            }
+
+            if (IsTeknoParrotRunning())
+            {
+                MessageBox.Show(this,
+                    "TeknoParrot is already running. Close it before launching a game from the manager.",
+                    "TeknoParrot Running", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            return true;
         }
 
         private void btnLaunch_Click(object sender, EventArgs e)
         {
             string selectedSave = (comboSaves.SelectedItem as ComboBoxItem)?.FullFilename;
-            if (selectedGameIndex < 0 || string.IsNullOrWhiteSpace(selectedSave)) return;
+            if (selectedGameIndex < 0 || string.IsNullOrWhiteSpace(selectedSave) || sessionActive) return;
+            if (!ValidateReadyToLaunch()) return;
 
-            string prefix = GetSelectedGamePrefix();
+            // A card already in TeknoParrot's folder is someone's progress
+            // (e.g. the manager was closed mid-session): import it, never overwrite.
+            if (!ImportStrayCard(selectedGameIndex, selectImported: false))
+                return;
+
             string saveFileName = GetSelectedSaveFileName();
-
-            currentSaveName = Path.GetFileNameWithoutExtension(selectedSave).Replace(prefix + "_", "");
             string sourcePath = Path.Combine(backupPath, selectedSave);
             string targetPath = Path.Combine(savePathRoot, saveFileName);
-            File.Copy(sourcePath, targetPath, true);
 
+            try
+            {
+                Directory.CreateDirectory(savePathRoot);
+                File.Copy(sourcePath, targetPath, true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"The save could not be loaded ({ex.Message}).",
+                    "Launch Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            launchedSaveFile = selectedSave;
             profileFile = GetSelectedProfileFile();
-            SavePreferences();
-            LaunchGame(profileFile);
+            SaveConfig();
+
+            if (!LaunchGame(profileFile))
+            {
+                // Un-stage so the card folder stays clean; the backup copy is untouched.
+                try { File.Delete(targetPath); } catch { }
+                launchedSaveFile = "";
+            }
         }
 
         private void btnNoSave_Click(object sender, EventArgs e)
         {
-            if (selectedGameIndex < 0) return;
-            string saveFileName = GetSelectedSaveFileName();
-            string targetPath = Path.Combine(savePathRoot, saveFileName);
-            if (File.Exists(targetPath)) File.Delete(targetPath);
+            if (selectedGameIndex < 0 || sessionActive) return;
+            if (!ValidateReadyToLaunch()) return;
+
+            // A card sitting here is someone's progress: import it instead of deleting it.
+            if (!ImportStrayCard(selectedGameIndex, selectImported: false))
+                return;
 
             profileFile = GetSelectedProfileFile();
-            currentSaveName = "";
-            SavePreferences();
+            launchedSaveFile = "";
+            SaveConfig();
             LaunchGame(profileFile);
         }
 
-        private void LaunchGame(string profile)
+        private bool LaunchGame(string profile)
         {
-            var info = new ProcessStartInfo
+            try
             {
-                FileName = teknoExePath,
-                Arguments = $"--profile=\"{profile}\" --start",
-                WorkingDirectory = Path.GetDirectoryName(teknoExePath),
-                UseShellExecute = true
-            };
-            Process.Start(info);
+                var info = new ProcessStartInfo
+                {
+                    FileName = teknoExePath,
+                    Arguments = $"--profile=\"{profile}\" --start",
+                    WorkingDirectory = Path.GetDirectoryName(teknoExePath),
+                    UseShellExecute = true
+                };
+                teknoProcess = Process.Start(info);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"TeknoParrot could not be started:\n{ex.Message}",
+                    "Launch Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                teknoProcess = null;
+                return false;
+            }
+
+            launchedGameIndex = selectedGameIndex;
+            sessionActive = true;
+            SetSessionUiState(true);
             this.WindowState = FormWindowState.Minimized;
             StartTeknoWatchdog();
+            return true;
         }
 
         private void StartTeknoWatchdog()
         {
-            teknoExitTimer = new Timer { Interval = 500 };
+            teknoExitTimer?.Stop();
+            teknoExitTimer?.Dispose();
+            teknoExitTimer = new Timer { Interval = 1000 };
+            int endedTicks = 0;
             teknoExitTimer.Tick += (s, e) =>
             {
-                var running = Process.GetProcessesByName("TeknoParrotUi").Any();
-                if (!running)
+                // Require a few consecutive quiet ticks: launcher stubs and
+                // TeknoParrot self-updates can briefly show no process during
+                // a hand-off, and one quiet second must not end the session.
+                endedTicks = SessionHasEnded() ? endedTicks + 1 : 0;
+                if (endedTicks < 3)
+                    return;
+
+                teknoExitTimer.Stop();
+                teknoExitTimer.Dispose();
+                teknoExitTimer = null;
+                teknoProcess?.Dispose();
+                teknoProcess = null;
+                sessionActive = false;
+                SetSessionUiState(false);
+
+                // Restore the window first so recovery prompts appear over it.
+                this.WindowState = FormWindowState.Normal;
+                this.BringToFront();
+                this.Activate();
+
+                try
                 {
-                    teknoExitTimer.Stop();
-                    teknoExitTimer.Dispose();
-                    teknoExitTimer = null;
-
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        string newFilenameToSelect = null;
-
-                        foreach (var (profile, displayName, saveFileName) in idGames)
-                        {
-                            string path = Path.Combine(savePathRoot, saveFileName);
-                            if (File.Exists(path))
-                            {
-                                string prefix = profile.Replace(".xml", "");
-
-                                if (!string.IsNullOrWhiteSpace(currentSaveName))
-                                {
-                                    string backupName = prefix + "_" + currentSaveName + ".bin";
-                                    string targetPath = Path.Combine(backupPath, backupName);
-                                    File.Copy(path, targetPath, true);
-                                    newFilenameToSelect = Path.GetFileName(targetPath);
-                                }
-                                else
-                                {
-                                    pendingSaveNeedsName = true;
-
-                                    string extracted = SaveFileHelper.TryExtractPlayerName(path);
-                                    string name = extracted;
-
-                                    bool skipPrompt = chkAutoNameOnly.Checked &&
-                                                      !string.IsNullOrWhiteSpace(name) &&
-                                                      !ContainsInvalidFileNameChars(name);
-
-                                    string promptText = ContainsInvalidFileNameChars(name)
-                                    ? "The extracted name contains invalid characters.\nPlease provide a valid name for your save:"
-    :                               $"Name the save created for {displayName} during your last session:";
-
-                                    if (!skipPrompt)
-                                    {
-                                        name = PromptForValidName(
-                                            promptText,
-                                            "New Save Detected",
-                                            extracted
-                                        );
-                                    }
-                                    string rawName = string.IsNullOrWhiteSpace(name)
-                                        ? "AutoBackup_" + DateTime.Now.ToString("yyyyMMdd_HHmmss")
-                                        : name;
-
-                                    string finalPath = GetUniqueSavePath(rawName, prefix);
-                                    File.Copy(path, finalPath);
-                                    newFilenameToSelect = Path.GetFileName(finalPath);
-                                }
-
-                                File.Delete(path);
-                            }
-                        }
-
-
-                        LoadBackupList();
-
-                        if (!string.IsNullOrEmpty(newFilenameToSelect))
-                        {
-                            comboSaves.SelectedItem = comboSaves.Items
-                                .Cast<ComboBoxItem>()
-                                .FirstOrDefault(i => i.FullFilename == newFilenameToSelect);
-                            UpdateLaunchButtons();
-                        }
-
-                        this.WindowState = FormWindowState.Normal;
-                        this.BringToFront();
-                        this.Activate();
-                    });
+                    RecoverSessionSaves();
+                }
+                finally
+                {
+                    launchedSaveFile = "";
+                    launchedGameIndex = -1;
                 }
             };
             teknoExitTimer.Start();
+        }
+
+        private bool SessionHasEnded()
+        {
+            // Watch the process we actually started, so a renamed or slow-starting
+            // exe can't make the first tick look like the session already ended.
+            bool processGone = true;
+            if (teknoProcess != null)
+            {
+                try { processGone = teknoProcess.HasExited; }
+                catch { processGone = true; } // can't query it: fall back to the name check
+            }
+            if (!processGone)
+                return false;
+
+            // TeknoParrot can hand off to another instance; wait for those too.
+            return !IsTeknoParrotRunning();
+        }
+
+        private void RecoverSessionSaves()
+        {
+            string newFilenameToSelect = null;
+
+            for (int i = 0; i < idGames.Length; i++)
+            {
+                var (profile, displayName, saveFileName) = idGames[i];
+                string path = Path.Combine(savePathRoot, saveFileName);
+                if (!File.Exists(path))
+                    continue;
+
+                string prefix = profile.Replace(".xml", "");
+                try
+                {
+                    // launchedSaveFile belongs to the game we launched; a card for
+                    // any other game is unrelated and gets imported as its own save.
+                    if (i == launchedGameIndex && !string.IsNullOrWhiteSpace(launchedSaveFile))
+                    {
+                        string targetPath = Path.Combine(backupPath, launchedSaveFile);
+                        string bakPath = targetPath + ".bak";
+                        long newSize = new FileInfo(path).Length;
+                        long oldSize = File.Exists(targetPath) ? new FileInfo(targetPath).Length : -1;
+
+                        // A crashed emulator can leave an empty or shrunken card;
+                        // never let a suspect card replace the only good copy.
+                        if (newSize == 0 || (oldSize > 0 && newSize < oldSize))
+                        {
+                            if (newSize > 0)
+                            {
+                                string recovered = GetUniqueSavePath(
+                                    "Recovered_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"), prefix);
+                                CopyWithRetry(path, recovered);
+                                MessageBox.Show(this,
+                                    $"The save from this session of {displayName} looks damaged (smaller than before), so your previous backup was kept.\n" +
+                                    $"The session save was stored as '{Path.GetFileName(recovered)}' just in case.",
+                                    "Save Not Updated", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                File.Delete(path);
+                            }
+                            else
+                            {
+                                MessageBox.Show(this,
+                                    $"The save from this session of {displayName} came back empty, so your previous backup was kept instead.",
+                                    "Save Not Updated", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                if (new FileInfo(path).Length == 0)
+                                    File.Delete(path); // re-checked: if it grew after all, leave it for import
+                            }
+                            continue;
+                        }
+
+                        if (File.Exists(targetPath))
+                        {
+                            File.Copy(targetPath, bakPath, true); // previous version survives one session
+                            try
+                            {
+                                CopyWithRetry(path, targetPath);
+                            }
+                            catch
+                            {
+                                // Never leave a half-written file as the visible save.
+                                try
+                                {
+                                    File.Copy(bakPath, targetPath, true);
+                                }
+                                catch
+                                {
+                                    MessageBox.Show(this,
+                                        $"The {displayName} save could not be written back, and restoring the previous version also failed.\n" +
+                                        $"An intact copy still exists at:\n{bakPath}",
+                                        "Backup Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                }
+                                throw; // report the original copy failure
+                            }
+                        }
+                        else
+                        {
+                            CopyWithRetry(path, targetPath);
+                        }
+                        newFilenameToSelect = Path.GetFileName(targetPath);
+                        DeleteSessionCard(path, displayName);
+                    }
+                    else
+                    {
+                        string extracted = SaveFileHelper.TryExtractPlayerName(path);
+                        string name = extracted;
+
+                        bool skipPrompt = chkAutoNameOnly.Checked &&
+                                          !string.IsNullOrWhiteSpace(name) &&
+                                          !ContainsInvalidFileNameChars(name ?? "");
+
+                        if (!skipPrompt)
+                        {
+                            string promptText = ContainsInvalidFileNameChars(name ?? "")
+                                ? "The extracted name contains invalid characters.\nPlease provide a valid name for your save:"
+                                : $"Name the save created for {displayName} during your last session:";
+                            name = PromptForValidName(promptText, "New Save Detected", extracted);
+                        }
+
+                        string rawName = string.IsNullOrWhiteSpace(name)
+                            ? "AutoBackup_" + DateTime.Now.ToString("yyyyMMdd_HHmmss")
+                            : name;
+
+                        string finalPath = GetUniqueSavePath(rawName, prefix);
+                        CopyWithRetry(path, finalPath);
+                        newFilenameToSelect = Path.GetFileName(finalPath);
+                        DeleteSessionCard(path, displayName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this,
+                        $"Could not back up the {displayName} save ({ex.Message}).\n" +
+                        "The file was left in place and will be imported the next time the manager starts.",
+                        "Backup Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+
+            LoadBackupList();
+
+            if (!string.IsNullOrEmpty(newFilenameToSelect))
+            {
+                comboSaves.SelectedItem = comboSaves.Items
+                    .Cast<ComboBoxItem>()
+                    .FirstOrDefault(x => x.FullFilename == newFilenameToSelect);
+                UpdateLaunchButtons();
+            }
+        }
+
+        // The backup already succeeded when this runs, so a failed card removal
+        // must not surface as "backup failed" — it only means a duplicate import
+        // at next startup.
+        private void DeleteSessionCard(string path, string displayName)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"The {displayName} save was backed up, but the session card could not be removed ({ex.Message}).\n" +
+                    "It will be re-imported the next time the manager starts.",
+                    "Backup Note", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private static void CopyWithRetry(string source, string destination)
+        {
+            const int attempts = 3;
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Copy(source, destination, true);
+                    return;
+                }
+                catch (IOException) when (attempt < attempts)
+                {
+                    // The game may still be releasing the file right after exit.
+                    System.Threading.Thread.Sleep(400);
+                }
+            }
+        }
+
+        private void PurgeOldTrash()
+        {
+            try
+            {
+                string trashDir = Path.Combine(backupPath, "Trash");
+                if (!Directory.Exists(trashDir))
+                    return;
+                foreach (string file in Directory.GetFiles(trashDir))
+                    if (DateTime.Now - File.GetLastWriteTime(file) > TimeSpan.FromDays(30))
+                        File.Delete(file);
+            }
+            catch
+            {
+                // Trash maintenance must never take the app down.
+            }
         }
 
         private bool ContainsInvalidFileNameChars(string input)
@@ -597,39 +918,89 @@ namespace IDAS_Save_System
         private void btnRename_Click(object sender, EventArgs e)
         {
             var selectedItem = comboSaves.SelectedItem as ComboBoxItem;
-            if (selectedItem != null)
+            if (selectedItem == null)
+                return;
+
+            string oldName = selectedItem.FullFilename;
+            string currentName = Path.GetFileNameWithoutExtension(selectedItem.DisplayText);
+            string newName = PromptForValidName("Enter new name for the save:", "Rename Save", currentName);
+            if (string.IsNullOrWhiteSpace(newName))
+                return;
+
+            string prefix = GetSelectedGamePrefix();
+            string newFileName = prefix + "_" + newName + ".bin";
+            if (newFileName == oldName)
+                return; // renamed to itself
+
+            string newPath = Path.Combine(backupPath, newFileName);
+            if (File.Exists(newPath))
             {
-                string oldName = selectedItem.FullFilename;
-                string newName = PromptForValidName("Enter new name for the save:", "Rename Save", selectedItem.DisplayText);
-                if (!string.IsNullOrWhiteSpace(newName))
+                MessageBox.Show("A save with that name already exists.");
+                return;
+            }
+
+            try
+            {
+                File.Move(Path.Combine(backupPath, oldName), newPath);
+                try
                 {
-                    string prefix = GetSelectedGamePrefix();
-                    string newPath = Path.Combine(backupPath, prefix + "_" + newName + ".bin");
-                    if (File.Exists(newPath))
-                    {
-                        MessageBox.Show("A save with that name already exists.");
-                        return;
-                    }
-                    File.Move(Path.Combine(backupPath, oldName), newPath);
-                    LoadBackupList();
-                    comboSaves.SelectedItem = comboSaves.Items.Cast<ComboBoxItem>().FirstOrDefault(i => i.FullFilename == Path.GetFileName(newPath));
+                    string oldBak = Path.Combine(backupPath, oldName + ".bak");
+                    if (File.Exists(oldBak))
+                        File.Move(oldBak, newPath + ".bak", true); // keep the safety copy attached
+                }
+                catch
+                {
+                    // Best effort: an orphaned .bak is harmless, and the rename
+                    // itself succeeded, so this must not report a failure.
                 }
             }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"The save could not be renamed ({ex.Message}).",
+                    "Rename Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                LoadBackupList();
+                return;
+            }
+            LoadBackupList();
+            comboSaves.SelectedItem = comboSaves.Items.Cast<ComboBoxItem>().FirstOrDefault(i => i.FullFilename == Path.GetFileName(newPath));
         }
 
         private void btnDelete_Click(object sender, EventArgs e)
         {
             var selectedItem = comboSaves.SelectedItem as ComboBoxItem;
-            if (selectedItem != null)
+            if (selectedItem == null)
+                return;
+
+            var confirm = MessageBox.Show($"Are you sure you want to delete '{selectedItem.DisplayText}'?", "Confirm Delete", MessageBoxButtons.YesNo);
+            if (confirm != DialogResult.Yes)
+                return;
+
+            try
             {
-                string selected = selectedItem.FullFilename;
-                var confirm = MessageBox.Show($"Are you sure you want to delete '{selected}'?", "Confirm Delete", MessageBoxButtons.YesNo);
-                if (confirm == DialogResult.Yes)
+                // Deleted saves go to a Trash folder (purged after 30 days at
+                // startup) so a misclick is recoverable.
+                string trashDir = Path.Combine(backupPath, "Trash");
+                Directory.CreateDirectory(trashDir);
+                string trashPath = Path.Combine(trashDir,
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + "_" + selectedItem.FullFilename);
+                File.Move(Path.Combine(backupPath, selectedItem.FullFilename), trashPath);
+                // Move preserves the old write time; restamp so the 30-day purge
+                // counts from deletion, not from when the save was last played.
+                File.SetLastWriteTime(trashPath, DateTime.Now);
+
+                string bakPath = Path.Combine(backupPath, selectedItem.FullFilename + ".bak");
+                if (File.Exists(bakPath))
                 {
-                    File.Delete(Path.Combine(backupPath, selected));
-                    LoadBackupList();
+                    File.Move(bakPath, trashPath + ".bak", true);
+                    File.SetLastWriteTime(trashPath + ".bak", DateTime.Now);
                 }
             }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"The save could not be deleted ({ex.Message}).",
+                    "Delete Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            LoadBackupList();
         }
 
         private void btnDuplicate_Click(object sender, EventArgs e)
@@ -641,8 +1012,9 @@ namespace IDAS_Save_System
                 string originalPath = Path.Combine(backupPath, original);
                 string prefix = GetSelectedGamePrefix();
 
-                // Strip prefix and extension to get base name
-                string baseName = Path.GetFileNameWithoutExtension(original).Replace(prefix + "_", "");
+                // Strip the leading prefix and extension to get the base name
+                string withoutExt = Path.GetFileNameWithoutExtension(original);
+                string baseName = withoutExt.StartsWith(prefix + "_") ? withoutExt.Substring(prefix.Length + 1) : withoutExt;
 
                 // Find next available numbered suggestion
                 int copyIndex = 2;
@@ -659,7 +1031,16 @@ namespace IDAS_Save_System
                 if (!string.IsNullOrWhiteSpace(newName))
                 {
                     string newPath = GetUniqueSavePath(newName, prefix);
-                    File.Copy(originalPath, newPath);
+                    try
+                    {
+                        File.Copy(originalPath, newPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(this, $"The save could not be duplicated ({ex.Message}).",
+                            "Duplicate Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
 
                     LoadBackupList();
                     comboSaves.SelectedItem = comboSaves.Items

@@ -1,7 +1,7 @@
-﻿using System;
+using System;
 using System.IO;
+using System.Linq;
 using System.Text;
-using System.Windows.Forms;
 
 namespace IDAS_Save_System
 {
@@ -24,17 +24,17 @@ namespace IDAS_Save_System
                 // Normalize (Shift-JIS full-width to ASCII)
                 string converted = rawStr.Normalize(NormalizationForm.FormKC);
 
-                return converted;
+                // The card field is padded to 12 bytes with NULs/spaces; strip the
+                // padding or the name always fails the invalid-filename-char check.
+                converted = new string(converted.Where(c => !char.IsControl(c)).ToArray()).Trim();
+
+                return string.IsNullOrWhiteSpace(converted) ? null : converted;
             }
-            catch (Exception ex)
+            catch
             {
-                MessageBox.Show($"Error extracting name: {ex.Message}");
+                // Unreadable card: the caller falls back to a timestamp name.
                 return null;
             }
         }
     }
 }
-
-
-
-   

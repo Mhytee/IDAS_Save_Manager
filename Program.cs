@@ -37,6 +37,20 @@ namespace IDAS_Save_System
             // Register Shift-JIS and other legacy code pages
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
+            // A missed exception should show a readable message, not the raw
+            // .NET crash dialog (or a silent vanish) mid-file-operation.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+                MessageBox.Show(
+                    "Something went wrong:\n" + e.Exception.Message +
+                    "\n\nThe app will keep running. If this happened while saving, check " +
+                    @"AppData\TeknoParrot and AppData\IDAS_Save_Manager\IDAS_Backups before launching again.",
+                    "Unexpected Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                MessageBox.Show(
+                    "A fatal error occurred:\n" + (e.ExceptionObject as Exception)?.Message,
+                    "Unexpected Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new Form2());
