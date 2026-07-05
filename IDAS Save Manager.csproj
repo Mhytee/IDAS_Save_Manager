@@ -1,8 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<AssemblyName>IDAS Save Manager</AssemblyName>
+		<AssemblyName>IDAS_Save_Manager</AssemblyName>
 		<OutputType>WinExe</OutputType>
+
+		<!-- Single source of truth for the app version.
+		     CI overrides this from the git tag (-p:Version=X.Y.Z);
+		     the title bar and update check read it from the assembly at runtime. -->
+		<Version>1.0.2</Version>
 		<TargetFramework>net8.0-windows</TargetFramework>
 		<UseWindowsForms>true</UseWindowsForms>
 

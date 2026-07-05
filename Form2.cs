@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace IDAS_Save_System
@@ -21,6 +22,11 @@ namespace IDAS_Save_System
         string currentSaveName = "";
         bool pendingSaveNeedsName = false;
         Timer teknoExitTimer;
+        Button btnUpdate;
+        ToolTip updateToolTip = new ToolTip();
+        UpdateInfo pendingUpdate;
+        bool updateInProgress = false;
+        string downloadedUpdateExe = null;
 
         private readonly (string profile, string displayName, string saveFileName)[] idGames = new[]
         {
@@ -66,14 +72,24 @@ namespace IDAS_Save_System
             InitializeComponent();
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MaximizeBox = true;
-            this.MinimumSize = new Size(479, 501);
+            // Never allow the window smaller than its designed layout — below that
+            // the bottom rows just clip, and the update banner would overlap them.
+            this.MinimumSize = new Size(LogicalToDeviceUnits(479), this.Height);
+            this.Text = $"IDAS Save Manager v{UpdateChecker.CurrentVersion.ToString(3)}";
+
+            btnUpdate = new Button
+            {
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                BackColor = Color.Gold,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Visible = false
+            };
+            btnUpdate.Click += btnUpdate_Click;
+            this.Controls.Add(btnUpdate);
         }
 
-        private async void Form2_Load(object sender, EventArgs e)
+        private void Form2_Load(object sender, EventArgs e)
 {
-    // ✅ Check for updates before doing anything else
-    await UpdateChecker.CheckAndPerformUpdate();
-
     Directory.CreateDirectory(appDataPath);
     Directory.CreateDirectory(backupPath);
     LoadOrPromptTeknoParrotPath();
@@ -121,7 +137,91 @@ namespace IDAS_Save_System
 
     suppressSaveSelectionEvents = false;
     UpdateLaunchButtons();
+
+    _ = Task.Run(UpdateChecker.CleanupAfterUpdate);
+    CheckForUpdatesInBackground();
 }
+
+        private async void CheckForUpdatesInBackground()
+        {
+            UpdateInfo update = await UpdateChecker.CheckForUpdateAsync();
+            if (update == null || IsDisposed)
+                return;
+
+            pendingUpdate = update;
+            updateToolTip.SetToolTip(btnUpdate, "A new version is available. Click to download and install.");
+            SetUpdateButtonText($"Update v{update.Version.ToString(3)}");
+            btnUpdate.Visible = true;
+            btnUpdate.BringToFront();
+        }
+
+        // The button lives in the top-right corner, opposite the DevName credit,
+        // so it stays compact: it is sized to its text and kept right-aligned.
+        private void SetUpdateButtonText(string text)
+        {
+            btnUpdate.Text = text;
+            Size textSize = TextRenderer.MeasureText(text, btnUpdate.Font);
+            btnUpdate.Size = new Size(textSize.Width + LogicalToDeviceUnits(16), LogicalToDeviceUnits(26));
+            btnUpdate.Location = new Point(
+                ClientSize.Width - btnUpdate.Width - LogicalToDeviceUnits(12),
+                LogicalToDeviceUnits(25));
+        }
+
+        private async void btnUpdate_Click(object sender, EventArgs e)
+        {
+            if (pendingUpdate == null || updateInProgress)
+                return;
+
+            if (teknoExitTimer != null)
+            {
+                MessageBox.Show(this,
+                    "A game session is still running. Finish the session first, then update.",
+                    "Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            updateInProgress = true;
+            UpdateLaunchButtons();
+            btnUpdate.Enabled = false;
+            string readyText = btnUpdate.Text;
+
+            if (downloadedUpdateExe == null || !File.Exists(downloadedUpdateExe))
+            {
+                var progress = new Progress<string>(SetUpdateButtonText);
+                downloadedUpdateExe = await UpdateChecker.DownloadUpdateAsync(pendingUpdate, progress, this);
+                if (downloadedUpdateExe == null)
+                {
+                    updateInProgress = false;
+                    UpdateLaunchButtons();
+                    btnUpdate.Enabled = true;
+                    SetUpdateButtonText(readyText);
+                    return;
+                }
+            }
+
+            // Belt and braces: never swap the exe while a session is active —
+            // the restart would kill the watchdog that backs up the session's save.
+            if (teknoExitTimer != null)
+            {
+                updateInProgress = false;
+                UpdateLaunchButtons();
+                btnUpdate.Enabled = true;
+                updateToolTip.SetToolTip(btnUpdate, "Update downloaded. Click to install once your game session has ended.");
+                SetUpdateButtonText("Install update");
+                return;
+            }
+
+            if (UpdateChecker.InstallAndRestart(downloadedUpdateExe, this))
+            {
+                Application.Exit(); // the new version is already starting
+                return;
+            }
+
+            updateInProgress = false;
+            UpdateLaunchButtons();
+            btnUpdate.Enabled = true;
+            SetUpdateButtonText(readyText);
+        }
 
 
 
@@ -226,8 +326,11 @@ namespace IDAS_Save_System
 
         private void UpdateLaunchButtons()
         {
-            btnLaunch.Enabled = comboSaves.SelectedItem != null && selectedGameIndex >= 0;
-            btnNoSave.Enabled = selectedGameIndex >= 0;
+            // Launching is blocked while an update download runs: a completed
+            // update restarts the app, which would kill the watchdog that backs
+            // up the session's save when the game closes.
+            btnLaunch.Enabled = !updateInProgress && comboSaves.SelectedItem != null && selectedGameIndex >= 0;
+            btnNoSave.Enabled = !updateInProgress && selectedGameIndex >= 0;
         }
 
         private string GetSelectedGamePrefix() => selectedGameIndex >= 0 ? idGames[selectedGameIndex].profile.Replace(".xml", "") : "Unknown";

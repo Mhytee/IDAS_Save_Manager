@@ -1,0 +1,57 @@
+name: Release
+
+# Publishing a release is just:
+#   git tag v1.0.2
+#   git push origin v1.0.2
+# The version baked into the exe (title bar + update check) comes from the tag.
+# Tags with a suffix (v1.0.3-beta) are marked as prereleases, which the
+# in-app updater ignores (it only looks at /releases/latest).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ver = $env:TAG.TrimStart("v")
+          if ($ver -notmatch '^\d+(\.\d+){1,3}(-[0-9A-Za-z.]+)?$') {
+            throw "Tag '$env:TAG' must look like v1.2.3 (or v1.2.3-beta for a prerelease)"
+          }
+          dotnet publish "IDAS Save Manager.csproj" -c Release -r win-x64 -p:Version=$ver -p:DebugType=None -p:DebugSymbols=false -o publish
+
+      - name: Zip
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: Compress-Archive -Path publish\* -DestinationPath "IDAS_Save_Manager_$($env:TAG).zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: IDAS_Save_Manager_*.zip
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## Installation
+            Download the zip below, extract it anywhere, and run `IDAS_Save_Manager.exe`.
+
+            **Windows says "Windows protected your PC"?** Click **More info**, then **Run anyway**.
+            This appears because the app isn't code-signed (certificates cost money); the full source is public in this repo.
+
+            **Upgrading from v1.0.1 or older?** Delete the old app folder first (your saves live in AppData and are not touched), extract this zip fresh, and update any shortcuts, since the exe is now named `IDAS_Save_Manager.exe`. Versions 1.0.2 and newer update themselves automatically.
